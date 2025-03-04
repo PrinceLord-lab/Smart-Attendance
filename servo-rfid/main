@@ -1,0 +1,300 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <MFRC522.h>
+#include <SPI.h>
+#include <ESP32Servo.h>
+
+// ----- Pin configuration -----
+#define RST_PIN            0    // Reset pin for MFRC522
+#define SS_PIN             5    // Slave Select pin for MFRC522
+#define BUZZER             14   // Buzzer pin
+#define greenLed           12   // Green LED (for authorized events)
+#define redLed             13   // Red LED (for unauthorized events)
+#define entranceServoPin   25   // Pin for entrance servo
+#define exitServoPin       26   // Pin for exit servo
+
+// ----- Servo open duration (milliseconds) -----
+const int SERVO_OPEN_DURATION = 5000;   // Stay open for 5 seconds
+
+Servo entranceServo;
+Servo exitServo;
+
+// ----- RFID reader and card data configuration -----
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+MFRC522::MIFARE_Key key;
+int blockNum = 2;            // Block to read (holds 16 bytes)
+byte bufferLen = 18;         // 16 bytes expected (+ extra room)
+byte readBlockData[18];      // Buffer for card data
+
+// ----- Authorized card IDs (exact, case-sensitive match) -----
+String authorizedCards[] = { "Prince_Mendoza", "Hannah_De_Leon", "Ralph_Manawes" };
+const int authorizedCount = sizeof(authorizedCards) / sizeof(authorizedCards[0]);
+
+// ----- Google Sheet endpoint URL (update with your actual URL) -----
+const String sheet_url = "https://script.google.com/macros/s/AKfycbxkFEYbnaFH_o08X6QfqrcluAw4ck_Kk3-JysBSnIvhzMP6N_olaDH4bqQyj6lAZLFT/exec?name=";
+
+// ----- WiFi credentials -----
+#define WIFI_SSID     "nyak"
+#define WIFI_PASSWORD "joyceanne"
+
+// ----- Storage for cards that are "inside" -----
+#define MAX_INSIDE_CARDS 10
+String insideCards[MAX_INSIDE_CARDS];  // Array to hold card IDs currently inside
+int insideCount = 0;                   // Count of currently inside cards
+
+// ----- Maximum retry attempts for HTTP update (entrance event) -----
+const int MAX_RETRIES = 3;
+
+// ----- Debounce and event lock variables -----
+bool eventInProgress = false;
+unsigned long lastEventTime = 0;  
+const unsigned long EVENT_DEBOUNCE_DELAY = 3000;  // 3-second debounce delay
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println();
+
+  // Connect to WiFi.
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(200);
+  }
+  Serial.println();
+  Serial.println("WiFi connected.");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+  Serial.println();
+
+  // Initialize outputs.
+  pinMode(BUZZER, OUTPUT);
+  pinMode(greenLed, OUTPUT);
+  pinMode(redLed, OUTPUT);
+
+  // Attach servos and set them to initial (closed) position.
+  entranceServo.attach(entranceServoPin);
+  exitServo.attach(exitServoPin);
+  entranceServo.write(0);
+  exitServo.write(0);
+
+  // Initialize SPI and RFID reader.
+  SPI.begin();
+  mfrc522.PCD_Init();
+  Serial.println("RFID reader initialized. Please scan a card.");
+}
+
+void loop() {
+  // If an event is currently in progress or if an event happened too recently, skip processing.
+  unsigned long now = millis();
+  if (eventInProgress || (now - lastEventTime < EVENT_DEBOUNCE_DELAY)) {
+    return;
+  }
+
+  // Check for a new card.
+  if (!mfrc522.PICC_IsNewCardPresent()) return;
+  if (!mfrc522.PICC_ReadCardSerial()) return;
+
+  eventInProgress = true;  // Lock out new events.
+
+  Serial.println("\n** Card Detected **");
+
+  // Read 16 bytes from specified block.
+  ReadDataFromBlock(blockNum, readBlockData);
+
+  // Copy card data into a C-string.
+  char cardData[17];
+  memcpy(cardData, readBlockData, 16);
+  cardData[16] = '\0';
+
+  Serial.print("Card data read: [");
+  Serial.print(cardData);
+  Serial.println("]");
+
+  // Convert to Arduino String.
+  String cardStr = String(cardData);
+
+  // Check if card is authorized.
+  bool isAuthorized = false;
+  for (int i = 0; i < authorizedCount; i++) {
+    if (cardStr == authorizedCards[i]) {
+      isAuthorized = true;
+      break;
+    }
+  }
+
+  if (isAuthorized) {
+    // Determine if the card is already marked as inside.
+    bool cardInside = false;
+    int insideIndex = -1;
+    for (int i = 0; i < insideCount; i++) {
+      if (insideCards[i] == cardStr) {
+        cardInside = true;
+        insideIndex = i;
+        break;
+      }
+    }
+
+    if (!cardInside) {
+      // --- ENTRANCE EVENT ---
+      Serial.println("Authorized card detected: Entrance event.");
+      
+      bool updateSuccess = false;
+      int attempts = 0;
+      while (attempts < MAX_RETRIES && !updateSuccess) {
+        updateSuccess = sendGoogleUpdate(cardStr, "entrance");
+        if (!updateSuccess) {
+          attempts++;
+          Serial.print("HTTP update for entrance event failed, retrying (");
+          Serial.print(attempts);
+          Serial.println(")...");
+          delay(2000);
+        }
+      }
+      
+      if (updateSuccess) {
+        simulateServo("entrance");  // Move entrance servo.
+
+        // Provide LED and buzzer feedback.
+        for (int k = 0; k < 2; k++) {
+          digitalWrite(BUZZER, HIGH);
+          digitalWrite(greenLed, HIGH);
+          delay(200);
+          digitalWrite(BUZZER, LOW);
+          digitalWrite(greenLed, LOW);
+          delay(200);
+        }
+        
+        // Add card to inside list.
+        if (insideCount < MAX_INSIDE_CARDS) {
+          insideCards[insideCount++] = cardStr;
+          Serial.print("Card ");
+          Serial.print(cardStr);
+          Serial.println(" added to the inside list.");
+        } else {
+          Serial.println("Inside card storage is full!");
+        }
+      } else {
+        Serial.println("HTTP update for entrance event failed after retries. Entrance event not recorded.");
+      }
+    } else {
+      // --- EXIT EVENT ---
+      Serial.println("Authorized card detected: Exit event.");
+      bool exitUpdateSuccess = sendGoogleUpdate(cardStr, "exit");
+      if (exitUpdateSuccess) {
+        simulateServo("exit");  // Move exit servo.
+        
+        // Provide LED and buzzer feedback.
+        for (int k = 0; k < 2; k++) {
+          digitalWrite(BUZZER, HIGH);
+          digitalWrite(greenLed, HIGH);
+          delay(200);
+          digitalWrite(BUZZER, LOW);
+          digitalWrite(greenLed, LOW);
+          delay(200);
+        }
+        
+        // Remove card from inside list.
+        if (insideIndex != -1) {
+          for (int i = insideIndex; i < insideCount - 1; i++) {
+            insideCards[i] = insideCards[i + 1];
+          }
+          insideCount--;
+          Serial.print("Card ");
+          Serial.print(cardStr);
+          Serial.println(" removed from inside list (exit event).");
+        }
+      } else {
+        Serial.println("HTTP update for exit event failed. Card remains marked as inside.");
+      }
+    }
+  } else {
+    // --- Unauthorized card ---
+    Serial.println("Unauthorized card detected.");
+    digitalWrite(BUZZER, HIGH);
+    digitalWrite(redLed, HIGH);
+    delay(1000);
+    digitalWrite(BUZZER, LOW);
+    digitalWrite(redLed, LOW);
+  }
+  
+  // End communication with the card.
+  mfrc522.PICC_HaltA();
+  mfrc522.PCD_StopCrypto1();
+
+  lastEventTime = millis();  // Record the time of this event.
+  eventInProgress = false;   // Release event lock.
+  delay(1000);               // Short delay before next iteration.
+}
+
+// Reads 16 bytes from the specified block.
+void ReadDataFromBlock(int blockNum, byte readBlockData[]) {
+  MFRC522::StatusCode status = mfrc522.PCD_Authenticate(
+      MFRC522::PICC_CMD_MF_AUTH_KEY_A, blockNum, &key, &(mfrc522.uid));
+  if (status != MFRC522::STATUS_OK) {
+    Serial.print("Authentication failed for Read: ");
+    Serial.println(mfrc522.GetStatusCodeName(status));
+    return;
+  } else {
+    Serial.println("Authentication successful for read.");
+  }
+  
+  status = mfrc522.MIFARE_Read(blockNum, readBlockData, &bufferLen);
+  if (status != MFRC522::STATUS_OK) {
+    Serial.print("Reading failed: ");
+    Serial.println(mfrc522.GetStatusCodeName(status));
+    return;
+  } else {
+    Serial.println("Block read successfully.");
+  }
+}
+
+// Controls the servos for "entrance" and "exit" events.
+// For both events, the servo is commanded to move to 90° (open),
+// remains for SERVO_OPEN_DURATION milliseconds, then returns to 0° (closed).
+void simulateServo(String mode) {
+  if (mode == "entrance") {
+    Serial.println("Activating entrance servo.");
+    entranceServo.write(90);  // Open entrance gate.
+    delay(SERVO_OPEN_DURATION);
+    entranceServo.write(0);   // Return to closed.
+    Serial.println("Entrance servo returned to normal position.");
+  } else if (mode == "exit") {
+    Serial.println("Activating exit servo.");
+    exitServo.write(90);      // Open exit gate.
+    delay(SERVO_OPEN_DURATION);
+    exitServo.write(0);       // Return to closed.
+    Serial.println("Exit servo returned to normal position.");
+  }
+}
+
+// Sends an HTTP GET update to the Google Sheet with the card ID and event type.
+// Returns true if the update is successful.
+bool sendGoogleUpdate(String cardId, String event) {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    String full_url = sheet_url + cardId + "&event=" + event;
+    HTTPClient https;
+    Serial.print("[HTTPS] Sending ");
+    Serial.print(event);
+    Serial.println(" update...");
+    if (https.begin(client, full_url)) {
+      int httpCode = https.GET();
+      if (httpCode > 0) {
+        Serial.printf("[HTTPS] %s update successful, code: %d\n", event.c_str(), httpCode);
+        https.end();
+        return true;
+      } else {
+        Serial.printf("[HTTPS] %s update failed, error: %s\n", event.c_str(), https.errorToString(httpCode).c_str());
+      }
+      https.end();
+    } else {
+      Serial.println("[HTTPS] Unable to connect for update");
+    }
+  } else {
+    Serial.println("[HTTPS] WiFi not connected, update aborted.");
+  }
+  return false;
+}
