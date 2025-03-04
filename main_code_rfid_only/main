@@ -21,7 +21,7 @@ byte bufferLen = 18;
 byte readBlockData[18];
 
 String card_holder_name;
-const String sheet_url = "https://script.google.com/macros/s/AKfycbxkFEYbnaFH_o08X6QfqrcluAw4ck_Kk3-JysBSnIvhzMP6N_olaDH4bqQyj6lAZLFT/exec?name";
+const String sheet_url = "https://script.google.com/macros/s/AKfycbxkFEYbnaFH_o08X6QfqrcluAw4ck_Kk3-JysBSnIvhzMP6N_olaDH4bqQyj6lAZLFT/exec?name=";
 
 #define WIFI_SSID "nyak"
 #define WIFI_PASSWORD "joyceanne"
