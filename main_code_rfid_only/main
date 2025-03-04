@@ -7,7 +7,9 @@
 
 #define RST_PIN 0
 #define SS_PIN 5
-#define BUZZER 15
+#define BUZZER 14
+#define greenLed 13
+#define redLed 12
 
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 MFRC522::MIFARE_Key key;
@@ -39,6 +41,8 @@ void setup() {
   Serial.println(WiFi.localIP());
   Serial.println();
   pinMode(BUZZER, OUTPUT);
+  pinMode(greenLed,OUTPUT);
+  pinMode(redLed,OUTPUT);
   SPI.begin();
 }
 
