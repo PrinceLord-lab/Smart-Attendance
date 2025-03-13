@@ -12,7 +12,7 @@
 #define greenLed           12   // Green LED (for authorized events)
 #define redLed             13   // Red LED (for unauthorized events)
 #define entranceServoPin   25   // Pin for entrance servo
-#define exitServoPin       26   // Pin for exit servo
+#define exitServoPin       33   // Pin for exit servo
 
 // Duration (in milliseconds) the servo stays open for passage.
 const int SERVO_OPEN_DURATION = 5000;   // 5000 ms = 5 seconds
@@ -68,11 +68,17 @@ void setup() {
   pinMode(greenLed, OUTPUT);
   pinMode(redLed, OUTPUT);
 
-  // Attach servos and set to initial (closed) position
+  // Attach servos with a custom pulse-width range.
+  // Many standard servos perform well with a 1000-2000 microseconds range.
   entranceServo.attach(entranceServoPin);
   exitServo.attach(exitServoPin);
+  
+  // Move servos to initial (closed) position
   entranceServo.write(0);
   exitServo.write(0);
+  
+  // Allow time for servos to move to the initial position
+  delay(1000);
 
   // Initialize SPI and RFID reader
   SPI.begin();
@@ -252,15 +258,14 @@ void simulateServo(String mode) {
     Serial.println("Activating entrance servo.");
     entranceServo.write(90);             // Open entrance servo to 90°
     delay(SERVO_OPEN_DURATION);          // Keep open for 5 seconds
-    entranceServo.write(0);              // Bring back to closed position (0°)
+    entranceServo.write(0);              // Return to closed position (0°)
     Serial.println("Entrance servo returned to normal position.");
   } 
   else if (mode == "exit") {
     Serial.println("Activating exit servo.");
-    // Use 90° for exit servo (adjust if needed according to your installation)
     exitServo.write(90);                 // Open exit servo to 90°
     delay(SERVO_OPEN_DURATION);          // Keep open for 5 seconds
-    exitServo.write(0);                  // Bring back to closed position (0°)
+    exitServo.write(0);                  // Return to closed position (0°)
     Serial.println("Exit servo returned to normal position.");
   }
 }
